@@ -2,55 +2,109 @@ import SwiftUI
 import Photos
 import PhotosUI
 
+struct RestoreItem: Identifiable {
+    enum Status { case pending, saved, failed }
+    let id = UUID()
+    let pair: LivePair
+    var status: Status = .pending
+    var detail = "Lista para restaurar"
+}
+
 @MainActor
 final class RestoreModel: ObservableObject {
-    @Published var pair: LivePair?
+    @Published var items: [RestoreItem] = []
     @Published var live: PHLivePhoto?
+    @Published var previewName = ""
     @Published var busy = false
-    @Published var saved = false
-    @Published var message = "Selecciona los dos originales de tu Live Photo desde Archivos."
+    @Published var progress: Double = 0
+    @Published var warnings: [String] = []
+    @Published var message = "Selecciona todas las imágenes y sus MOV originales desde Archivos."
+    @Published var stopping = false
+    private var folder: URL?
+    var remaining: Int { items.filter { $0.status != .saved }.count }
 
     func select(_ urls: [URL]) {
-        guard !busy else { return }
+        guard !busy, !urls.isEmpty else { return }
         busy = true
-        saved = false
+        progress = 0
         live = nil
-        pair?.discard()
-        pair = nil
-        message = "Preparando y comprobando la pareja…"
+        items = []
+        warnings = []
+        if let folder { try? FileManager.default.removeItem(at: folder) }
+        folder = nil
+        message = "Leyendo los originales…"
         Task {
-            var staged: LivePair?
             do {
-                // Copying a MOV from a file provider must not block the UI.
-                let candidate = try await Task.detached(priority: .userInitiated) { try LivePair.stage(urls) }.value
-                staged = candidate
-                try await LivePhotoService.validateIdentifiers(candidate)
-                let preview = try await LivePhotoService.preview(candidate)
-                pair = candidate
-                live = preview
-                message = "Pareja válida. Mantén pulsada la vista previa para ver el movimiento."
-            } catch {
-                staged?.discard()
-                message = error.localizedDescription
-            }
+                let batch = try await BatchService.prepare(urls) { done, total in
+                    await MainActor.run {
+                        self.progress = Double(done) / Double(max(total, 1))
+                        self.message = "Leyendo archivos: \(done)/\(total)"
+                    }
+                }
+                folder = batch.folder
+                items = batch.pairs.map { RestoreItem(pair: $0) }
+                warnings = batch.warnings
+                message = "\(items.count) parejas encontradas. \(warnings.count) incidencias."
+                if let first = items.first {
+                    do {
+                        live = try await LivePhotoService.preview(first.pair)
+                        previewName = first.pair.image.lastPathComponent
+                    } catch {
+                        warnings.append("Vista previa de \(first.pair.image.lastPathComponent): \(error.localizedDescription)")
+                    }
+                }
+            } catch { message = error.localizedDescription }
             busy = false
         }
     }
 
     func save() {
-        guard let pair, live != nil, !busy, !saved else { return }
+        guard !busy, remaining > 0 else { return }
         busy = true
-        message = "Guardando en Fotos…"
+        stopping = false
+        progress = 0
+        live = nil
         Task {
-            do {
-                try await LivePhotoService.save(pair)
-                saved = true
-                message = "Guardada en Fotos como Live Photo. Búscala en las fotos añadidas recientemente."
-            } catch {
-                message = "No se ha podido guardar: \(error.localizedDescription)"
+            let authorization = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+            guard authorization == .authorized else {
+                message = "Permite añadir fotos en Ajustes → LiveRestore → Fotos y vuelve a intentarlo."
+                busy = false
+                return
+            }
+            let indices = items.indices.filter { items[$0].status != .saved }
+            var completed = 0
+            for index in indices {
+                if stopping { break }
+                message = "Restaurando \(completed + 1)/\(indices.count): \(items[index].pair.image.lastPathComponent)"
+                do {
+                    try await validate(items[index].pair)
+                    try await LivePhotoService.save(items[index].pair)
+                    items[index].status = .saved
+                    items[index].detail = "Guardada en Fotos"
+                } catch {
+                    items[index].status = .failed
+                    items[index].detail = error.localizedDescription
+                }
+                completed += 1
+                progress = Double(completed) / Double(max(indices.count, 1))
+            }
+            let saved = items.filter { $0.status == .saved }.count
+            let failed = items.filter { $0.status == .failed }.count
+            let pending = items.filter { $0.status == .pending }.count
+            message = "\(saved) guardadas · \(failed) fallidas · \(pending) pendientes."
+            if remaining == 0, let folder {
+                try? FileManager.default.removeItem(at: folder)
+                self.folder = nil
             }
             busy = false
+            stopping = false
         }
+    }
+
+    private func validate(_ pair: LivePair) async throws {
+        // Keep only one decoded Live Photo in memory during a batch.
+        let preview = try await LivePhotoService.preview(pair)
+        _ = preview
     }
 }
 
@@ -61,49 +115,56 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
-                    Label("Recupera el movimiento", systemImage: "livephoto")
-                        .font(.largeTitle.bold())
-                    Text("Tu foto y su vídeo, juntos otra vez en Fotos.")
-                        .font(.title3).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 20) {
+                    Label("Recupera el movimiento", systemImage: "livephoto").font(.largeTitle.bold())
+                    Text("Restaura varias Live Photos de una sola vez.").font(.title3).foregroundStyle(.secondary)
                     if let live = model.live {
-                        LivePreview(live: live)
-                            .frame(height: 320).clipShape(RoundedRectangle(cornerRadius: 22))
-                    } else {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 22).fill(Color.accentColor.opacity(0.09))
-                            VStack(spacing: 12) {
-                                Image(systemName: "livephoto").font(.system(size: 64))
-                                Text("HEIC + MOV originales").font(.headline)
-                            }.foregroundStyle(Color.accentColor)
-                        }.frame(height: 240)
-                    }
-                    if let pair = model.pair {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Label(pair.image.lastPathComponent, systemImage: "photo")
-                            Label(pair.video.lastPathComponent, systemImage: "video")
-                        }.font(.footnote).textSelection(.enabled)
+                        LivePreview(live: live).frame(height: 280).clipShape(RoundedRectangle(cornerRadius: 22))
+                        Text("Vista previa: \(model.previewName)").font(.caption)
                     }
                     Text(model.message).accessibilityIdentifier("status")
-                    if model.busy { ProgressView().frame(maxWidth: .infinity) }
+                    if model.busy { ProgressView(value: model.progress) }
                     Button { picking = true } label: {
-                        Label("Elegir HEIC y MOV", systemImage: "folder")
-                            .frame(maxWidth: .infinity).padding(.vertical, 7)
+                        Label("Elegir imágenes y MOV", systemImage: "folder").frame(maxWidth: .infinity).padding(.vertical, 7)
                     }.buttonStyle(.bordered).disabled(model.busy)
                     Button { model.save() } label: {
-                        Label(model.saved ? "Live Photo guardada" : "Guardar Live Photo en Fotos",
-                              systemImage: model.saved ? "checkmark.circle.fill" : "square.and.arrow.down")
+                        Label("Restaurar \(model.remaining) Live Photos", systemImage: "square.and.arrow.down")
                             .frame(maxWidth: .infinity).padding(.vertical, 7)
-                    }.buttonStyle(.borderedProminent)
-                        .disabled(model.live == nil || model.busy || model.saved)
-                    Text("Para tu NAS: Archivos → Explorar → ⋯ → Conectarse al servidor. Después selecciona ambos archivos aquí. Se conservan sus bytes originales.")
+                    }.buttonStyle(.borderedProminent).disabled(model.busy || model.remaining == 0)
+                    if model.busy && !model.items.isEmpty {
+                        Button(model.stopping ? "Deteniendo…" : "Detener después de esta foto") { model.stopping = true }
+                            .disabled(model.stopping)
+                    }
+                    LazyVStack(alignment: .leading, spacing: 14) {
+                        ForEach(model.items) { item in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Label(item.pair.image.lastPathComponent, systemImage: icon(item.status)).font(.subheadline.bold())
+                                Text(item.detail).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    if !model.warnings.isEmpty {
+                        DisclosureGroup("Archivos omitidos / avisos (\(model.warnings.count))") {
+                            ForEach(Array(model.warnings.enumerated()), id: \.offset) { entry in
+                                Text(entry.element).font(.caption).frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 4)
+                            }
+                        }
+                    }
+                    Text("Selecciona las imágenes y sus vídeos originales. Se emparejan por sus metadatos aunque los nombres sean diferentes. Mantén la app abierta durante la restauración.")
                         .font(.footnote).foregroundStyle(.secondary)
+                    Text("NAS: Archivos → Explorar → ⋯ → Conectarse al servidor.").font(.footnote).foregroundStyle(.secondary)
                 }.padding(24)
             }
             .navigationTitle("LiveRestore").navigationBarTitleDisplayMode(.inline)
-            .sheet(isPresented: $picking) {
-                FilePicker(selected: { urls in picking = false; model.select(urls) })
-            }
+            .sheet(isPresented: $picking) { FilePicker(selected: { urls in picking = false; model.select(urls) }) }
+        }
+    }
+
+    private func icon(_ status: RestoreItem.Status) -> String {
+        switch status {
+        case .pending: return "livephoto"
+        case .saved: return "checkmark.circle.fill"
+        case .failed: return "exclamationmark.triangle"
         }
     }
 }

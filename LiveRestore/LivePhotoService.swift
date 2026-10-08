@@ -13,57 +13,33 @@ struct LivePair {
     let image: URL
     let video: URL
 
-    static func stage(_ urls: [URL]) throws -> LivePair {
-        let images = urls.filter { ["heic", "heif", "jpg", "jpeg"].contains($0.pathExtension.lowercased()) }
-        let movies = urls.filter { $0.pathExtension.lowercased() == "mov" }
-        guard urls.count == 2, images.count == 1, movies.count == 1 else {
-            throw RestoreError(message: "Selecciona exactamente una imagen HEIC/JPEG y su vídeo MOV original.")
-        }
-        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        do {
-            func copy(_ source: URL) throws -> URL {
-                let scoped = source.startAccessingSecurityScopedResource()
-                defer { if scoped { source.stopAccessingSecurityScopedResource() } }
-                let destination = folder.appendingPathComponent(source.lastPathComponent)
-                // Coordinate reads from Files providers (including SMB/iCloud).
-                var coordinationError: NSError?
-                var copyError: Error?
-                NSFileCoordinator().coordinate(readingItemAt: source, options: [], error: &coordinationError) { readable in
-                    do { try FileManager.default.copyItem(at: readable, to: destination) }
-                    catch { copyError = error }
-                }
-                if let error = coordinationError { throw error }
-                if let error = copyError { throw error }
-                return destination
-            }
-            return try LivePair(folder: folder, image: copy(images[0]), video: copy(movies[0]))
-        } catch {
-            try? FileManager.default.removeItem(at: folder)
-            throw error
-        }
-    }
 
-    func discard() { try? FileManager.default.removeItem(at: folder) }
 }
 
 enum LivePhotoService {
-    static func validateIdentifiers(_ pair: LivePair) async throws {
-        guard let source = CGImageSourceCreateWithURL(pair.image as CFURL, nil),
+    static func imageIdentifier(_ url: URL) throws -> String {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any],
               let maker = properties[kCGImagePropertyMakerAppleDictionary as String] as? [String: Any],
-              let imageID = maker["17"] as? String, !imageID.isEmpty else {
-            throw RestoreError(message: "La imagen no conserva el identificador de una Live Photo original. Esta versión restaura parejas originales; no convierte vídeos sueltos.")
+              let identifier = maker["17"] as? String, !identifier.isEmpty else {
+            throw RestoreError(message: "La imagen no conserva el identificador Live Photo original.")
         }
-        let asset = AVURLAsset(url: pair.video)
-        let metadata = try await asset.load(.metadata)
-        var movieID: String?
+        return identifier
+    }
+
+    static func videoIdentifier(_ url: URL) async throws -> String {
+        let metadata = try await AVURLAsset(url: url).load(.metadata)
         for item in metadata where item.identifier?.rawValue == "mdta/com.apple.quicktime.content.identifier" {
-            movieID = try await item.load(.stringValue)
-            if movieID != nil { break }
+            if let identifier = try await item.load(.stringValue), !identifier.isEmpty { return identifier }
         }
-        guard let movieID, imageID == movieID else {
-            throw RestoreError(message: "El HEIC y el MOV no tienen el mismo identificador Live Photo. Selecciona los dos originales de la misma foto.")
+        throw RestoreError(message: "El MOV no conserva el identificador Live Photo original.")
+    }
+
+    static func validateIdentifiers(_ pair: LivePair) async throws {
+        let imageID = try imageIdentifier(pair.image)
+        let movieID = try await videoIdentifier(pair.video)
+        guard imageID == movieID else {
+            throw RestoreError(message: "La imagen y el MOV no pertenecen a la misma Live Photo.")
         }
     }
 

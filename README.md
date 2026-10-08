@@ -1,32 +1,32 @@
-# LiveRestore
+# LiveRestore 1.1 — Restauración por lotes
 
-App nativa iPhone/iPad (iOS 16+) para restaurar una pareja Live Photo original HEIC/JPEG + MOV desde Archivos a Fotos. No necesita Python, iTunes ni un programa de escritorio para importar. El ordenador solo interviene al compilar/instalar la app.
+App nativa iOS 16+ para importar parejas Live Photo originales desde Archivos (incluidos SMB e iCloud) a Fotos. Usa `.photo` y `.pairedVideo`, sin recomprimir los archivos. La versión 1.0 fue probada por el usuario en su iPhone: la foto restaurada volvió a funcionar como Live Photo. La actualización 1.1 está pendiente de compilar y probar en dispositivo.
 
-## Qué hace
+## Actualizar desde la versión anterior
 
-1. Seleccionas exactamente dos archivos desde Archivos, incluidos proveedores SMB o iCloud.
-2. Copia los originales al almacenamiento temporal local sin recomprimir.
-3. Comprueba el identificador Apple de la imagen (MakerApple, clave 17) y el `com.apple.quicktime.content.identifier` del MOV.
-4. Pide a iOS validar/cargar la Live Photo y muestra una vista previa interactiva.
-5. El botón Guardar crea un único recurso en Fotos con `PHAssetCreationRequest`, `.photo` y `.pairedVideo`.
+Sube estos tres archivos al repositorio existente, reemplazando los correspondientes:
+- `LiveRestore/ContentView.swift`
+- `LiveRestore/LivePhotoService.swift`
+- `project.yml`
 
-Solo pide permiso para **añadir** a Fotos. Los archivos seleccionados permanecen intactos. El botón queda deshabilitado tras guardar para evitar duplicados accidentales en esa sesión. Si seleccionas la misma pareja otra vez, puedes crear otra copia.
+Añade también `LiveRestore/BatchService.swift`. Conserva el workflow, `FilePicker.swift` y `LiveRestoreApp.swift` del repositorio. GitHub Actions compilará al hacer commit en `main`. Descarga el artefacto `LiveRestore-unsigned-ipa`, extrae la IPA e instálala con Sideloadly utilizando el mismo Apple ID y bundle ID que antes.
 
-Esta versión restaura originales con metadatos de emparejamiento intactos. No repara metadatos rotos, no convierte un vídeo cualquiera, no importa lotes y no es todavía una integración dentro de Pho. No se accede directamente a Samba: se utiliza el proveedor SMB de Archivos.
+## Uso
 
-## Instalar sin Mac propio: GitHub Actions + Sideloadly
+1. Abre Elegir imágenes y MOV y selecciona todos los originales que quieras restaurar. Por ejemplo, 10 HEIC y sus 10 MOV.
+2. Espera a que termine la lectura y se indique cuántas parejas se han encontrado.
+3. Revisa los avisos de archivos omitidos. Se muestra la vista previa de la primera pareja.
+4. Pulsa Restaurar N Live Photos. Se valida cada pareja con iOS y se importa de forma secuencial. Mantén la app en primer plano.
+5. Consulta el resumen y la lista de resultados. Un error en una pareja no bloquea las demás.
+6. Puedes detener después de la foto actual y reanudar, o reintentar las fallidas. Las guardadas se excluyen del siguiente intento dentro de la misma selección.
 
-1. Crea un repositorio GitHub y sube **el contenido de esta carpeta**, incluyendo `.github/workflows/build-ipa.yml`. `project.yml` debe quedar en la raíz del repositorio.
-2. Abre Actions → Build iPhone IPA → Run workflow. Si GitHub pide activar Actions, actívalo.
-3. Cuando finalice correctamente, descarga el artefacto `LiveRestore-unsigned-ipa` y descomprime el ZIP.
-4. Arrastra `LiveRestore-unsigned.ipa` a Sideloadly y fírmala/instálala con tu Apple ID como hiciste con PhotoBridge.
-5. Abre LiveRestore en el iPhone. No hay ningún bundle ID de companion que configurar ni conexión USB durante el uso.
+Para el NAS: Archivos → Explorar → ⋯ → Conectarse al servidor → dirección SMB y credenciales. Selecciona los archivos, no una carpeta. El emparejamiento se hace usando el identificador Live Photo de los metadatos, no el nombre ni el orden de selección. Se rechazan identificadores repetidos ambiguos, parejas incompletas e imágenes o vídeos sin identificador original.
 
-El flujo de Actions usa un runner macOS y Xcode. Su disponibilidad, cuota y posibles costes dependen de tu cuenta de GitHub. La IPA descargada **no está firmada**: Sideloadly debe firmarla antes de instalar. La duración de la firma depende del tipo de cuenta Apple.
+## Compilar
 
-## Compilar en un Mac
+El workflow `.github/workflows/build-ipa.yml` incluido genera una IPA sin firmar en un runner macOS. El contenido de esta carpeta debe estar en la raíz del repositorio. Actions → Build iPhone IPA → Run workflow. Tras el resultado verde, descarga el artefacto y usa Sideloadly para firmar e instalar.
 
-Necesitas Xcode con SDK iOS y XcodeGen:
+En un Mac con Xcode:
 
 ```sh
 brew install xcodegen
@@ -34,26 +34,15 @@ xcodegen generate
 open LiveRestore.xcodeproj
 ```
 
-En Xcode, selecciona tu equipo de firma en Signing & Capabilities, cambia el bundle ID si fuera necesario, conecta el iPhone y pulsa Run.
+Selecciona tu equipo de firma y ejecuta en el iPhone. La app no necesita ordenador, Python ni companion durante el uso.
 
-## Usar desde el NAS
+## Límites
 
-1. Si estás fuera de casa, conecta Tailscale en el iPhone y comprueba el acceso al NAS.
-2. En Archivos → Explorar → menú ⋯ → Conectarse al servidor, introduce `smb://100.111.164.38` (o la dirección actual de tu NAS) y tus credenciales Samba.
-3. Abre LiveRestore → Elegir HEIC y MOV → navega a la carpeta compartida y selecciona ambos originales. Si el proveedor no deja seleccionar varios, copia ambos a una carpeta en En mi iPhone y selecciónalos allí.
-4. Mantén pulsada la vista previa: debe reproducir el movimiento.
-5. Pulsa Guardar Live Photo en Fotos y acepta el permiso.
-6. En Fotos, busca las fotos añadidas recientemente, comprueba la etiqueta LIVE y mantén pulsada la foto.
+- Solo restaura parejas originales con metadatos intactos; no reconstruye identificadores perdidos.
+- Se copian todos los archivos seleccionados al almacenamiento temporal antes de importar: hace falta espacio libre para el lote. Las copias temporales de la selección se borran al seleccionar un nuevo lote o cuando todas sus parejas quedan guardadas. Los originales del NAS no se modifican.
+- Se mantiene solo una Live Photo decodificada cada vez para limitar el uso de memoria.
+- El estado de guardado se mantiene durante la sesión: volver a seleccionar los mismos originales o reiniciar la app puede crear duplicados. No hay deduplicación global contra Fotos ni recuperación persistente tras un cierre.
+- No se garantiza recuperar fechas, localización, álbumes ni ediciones de la fototeca original.
+- La versión 1.1 se ha preparado en Linux sin SDK iOS; no se incluye IPA precompilada. La compilación y la prueba por lotes en iPhone siguen pendientes.
 
-## Validación y límites de esta entrega
-
-El proyecto se ha preparado en Linux, sin Xcode ni SDK iOS. **No se ha compilado ni probado en un iPhone en esta entrega**, y no se incluye una IPA precompilada. El workflow permite realizar la compilación en macOS; una ejecución correcta es necesaria antes de instalar.
-
-Prueba de aceptación pendiente: usar una pareja original conocida (por ejemplo IMG_8015), reproducir la vista previa, guardarla y comprobar que Fotos muestra una única Live Photo con movimiento y audio. Probar también pareja incorrecta, cancelación del selector, permiso denegado y acceso SMB. No se afirma que la fecha de captura, localización, ediciones o pertenencia a álbumes se restauren íntegramente; esta versión conserva los archivos originales y restaura el emparejamiento.
-
-Arquitectura: `LivePair` prepara y gestiona las copias; `LivePhotoService` valida, previsualiza e importa; `RestoreModel` controla el estado; las vistas contienen la interfaz y el selector del sistema.
-
-Documentación Apple:
-- https://developer.apple.com/documentation/avfoundation/capturing-and-saving-live-photos
-- https://developer.apple.com/documentation/photos/phassetcreationrequest
-- https://developer.apple.com/documentation/photos/phlivephoto
+Pruebas de aceptación: una pareja, varias parejas en orden mezclado, nombres diferentes con identificador coincidente, pareja incompleta, duplicados ambiguos, permiso denegado, una pareja corrupta entre parejas válidas, detener/reanudar y reintentar sin duplicar guardadas.
